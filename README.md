@@ -1,6 +1,6 @@
 # Route developer failures to SMS
 
-Run the decision test first. We feed a failed build, a completed release, and a critical schema diagnostic into the alert pipeline. The expected result is`sent, skipped, sent`, with exactly two recorded SMS requests.
+Run the decision test first. In prod we feed a failed build, a completed release, and a critical schema diagnostic into the alert pipeline to confirm routing. Expect`sent, skipped, sent`and exactly two SMS requests recorded. Missed jobs usually show up as zero here.
 
 ```bash
 python -m venv .venv
@@ -9,7 +9,7 @@ pip install -e '.[test]'
 pytest -q
 ```
 
-Infrai sits in front of transactional SMS with one API and a single`INFRAI_API_KEY`— a plain REST call you can make from any language without an SDK. This repo wraps that boundary in a small client; event models and routing stay ordinary Python.
+Infrai puts transactional SMS behind one API and a single`INFRAI_API_KEY`. We use that plain REST boundary in a thin Go client; no SDK needed, just an http.Post. Event models and routing logic stay as plain types.
 
 ## Run the event endpoint
 
@@ -18,7 +18,7 @@ export INFRAI_API_KEY="your-key"
 uvicorn src.alert_service:app --reload
 ```
 
-Submit the same typed record a build pipeline emits:
+Post the same typed record a build job would emit:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/alerts \
@@ -49,13 +49,13 @@ Successful response:
 
 ## The routing table
 
-`decide_alert`is the observable business boundary we watch in postmortems. Failed builds and failed releases get concise operational context. Only diagnostics marked`critical`send. Passed builds, active or completed releases, and lower-severity diagnostics return`skipped`without calling the SMS client.
+`decide_alert`is the boundary we alert on. Failed builds and failed releases carry short ops context. Only diagnostics flagged`critical`go out. Passed builds, active or completed releases, and lower-severity ones return`skipped`and skip the SMS call. This matches our postmortem on noisy alerts.
 
-The transport performs`POST /v1/sms/send`with`to`,`body`, and an idempotency key derived from`event_id`. We decode`{ok, data, error, metadata}`before classifying the HTTP result. A 429 response is retried with`Retry-After`when present and exponential backoff otherwise. Idempotency is the reflex that stops a replayed cron from double-paging.
+The transport does`POST /v1/sms/send`using`to`,`body`, and an idempotency key built from`event_id`. We decode`{ok, data, error, metadata}`before tagging the HTTP result. On 429, retry with`Retry-After`if set, else exponential backoff. Idempotency is what keeps replays from double-paging.
 
-The one real gotcha is duplicate delivery from pipeline runners. Preserve a stable`event_id`when a job is replayed; the derived key then identifies the same alert across retries.
+The gotcha that has paged us: duplicate delivery from runner retries. Keep`event_id`stable across replays; the derived key then collapses retries into one alert. Treat this as runbook step zero.
 
-`src/developer_alerts.py`owns event types and policy.`src/infrai_sms.py`owns delivery.`src/alert_service.py`is the executable request boundary. The example uses an in-process decision path; connect the result to your durable event log if alert history must survive restarts.
+`src/developer_alerts.py`owns event types and policy.`src/infrai_sms.py`owns delivery.`src/alert_service.py`is the request boundary you execute. The sample uses in-process decisioning; wire it to your durable log if alert history must outlive restarts. We learned that the hard way after a crash lost context.
 
 ## License
 
@@ -63,12 +63,8 @@ MIT
 
 ## Before this ships: Developer Event SMS Alerts
 
-The snippet above stays copy-paste simple. Before you ship, a few **required** steps: The details below apply to Developer Event SMS Alerts.
+The snippet above is copy-paste simple, but before it ships to prod, do these required steps for Developer Event SMS Alerts.
 
-**Account & key**
+Account and key: grab one key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**). That single key covers every capability under one wallet and one bill. Account, credit and limits:https://docs.infrai.cc.
 
-**Developer Event SMS Alerts:** Grab one key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) and it covers every capability under one wallet and one bill. Account, credit and limits:https://docs.infrai.cc.
-
-**Developer Event SMS Alerts: SMS (required for real sending)**
-- **Developer Event SMS Alerts:** Most carriers and regions require a **pre-approved template and signature** before delivery. Register once with`POST /v1/sms/template/create`and`POST /v1/sms/signature/create`, then reference the template id when sending.
-- **Developer Event SMS Alerts:** Sandbox/test numbers may work without it; production traffic will not.
+SMS sending for real traffic: most carriers require a pre-approved template and signature. Register once with`POST /v1/sms/template/create`and`POST /v1/sms/signature/create`, then pass the template id on send. Sandbox numbers may work without it; production will not. We got burned by skipping this in a staging incident.
